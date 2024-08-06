@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 import joblib
 import pandas as pd
@@ -47,9 +47,12 @@ def _load_signal_candles(backtest_dir: Path):
     return _load_backtest_analysis_data(backtest_dir, "signals")
 
 
-def _process_candles_and_indicators(pairlist, strategy_name, trades, signal_candles):
-    analysed_trades_dict = {}
-    analysed_trades_dict[strategy_name] = {}
+def _load_exit_signal_candles(backtest_dir: Path) -> Dict[str, Dict[str, pd.DataFrame]]:
+    return _load_backtest_analysis_data(backtest_dir, "exited")
+
+
+def _process_candles_and_indicators(pairlist, strategy_name, trades, signal_candles, date_col: str):
+    analysed_trades_dict: Dict[str, Dict] = {strategy_name: {}}
 
     try:
         logger.info(f"Processing {strategy_name} : {len(pairlist)} pairs")
@@ -57,7 +60,7 @@ def _process_candles_and_indicators(pairlist, strategy_name, trades, signal_cand
         for pair in pairlist:
             if pair in signal_candles[strategy_name]:
                 analysed_trades_dict[strategy_name][pair] = _analyze_candles_and_indicators(
-                    pair, trades, signal_candles[strategy_name][pair]
+                    pair, trades, signal_candles[strategy_name][pair], date_col
                 )
     except Exception as e:
         print(f"Cannot process entry/exit reasons for {strategy_name}: ", e)
@@ -65,7 +68,9 @@ def _process_candles_and_indicators(pairlist, strategy_name, trades, signal_cand
     return analysed_trades_dict
 
 
-def _analyze_candles_and_indicators(pair, trades: pd.DataFrame, signal_candles: pd.DataFrame):
+def _analyze_candles_and_indicators(
+    pair: str, trades: pd.DataFrame, signal_candles: pd.DataFrame, date_col: str
+) -> pd.DataFrame:
     buyf = signal_candles
 
     if len(buyf) > 0:
@@ -75,8 +80,8 @@ def _analyze_candles_and_indicators(pair, trades: pd.DataFrame, signal_candles: 
         trades_inds = pd.DataFrame()
 
         if trades_red.shape[0] > 0 and buyf.shape[0] > 0:
-            for t, v in trades_red.open_date.items():
-                allinds = buyf.loc[(buyf["date"] < v)]
+            for t, v in trades_red.iterrows():
+                allinds = buyf.loc[(buyf["date"] < v[date_col])]
                 if allinds.shape[0] > 0:
                     tmp_inds = allinds.iloc[[-1]]
 
@@ -235,7 +240,7 @@ def _select_rows_by_tags(df, enter_reason_list, exit_reason_list):
 
 def prepare_results(
     analysed_trades, stratname, enter_reason_list, exit_reason_list, timerange=None
-):
+) -> pd.DataFrame:
     res_df = pd.DataFrame()
     for pair, trades in analysed_trades[stratname].items():
         if trades.shape[0] > 0:
@@ -257,8 +262,11 @@ def print_results(
     csv_path: Path,
     rejected_signals=None,
     to_csv=False,
+    exited_signals=False,
 ):
     if res_df.shape[0] > 0:
+        if exited_signals is True:
+            print("Analysing on exit signals.")
         if analysis_groups:
             _do_group_table_output(res_df, analysis_groups, to_csv=to_csv, csv_path=csv_path)
 
@@ -316,6 +324,7 @@ def process_entry_exit_reasons(config: Config):
         enter_reason_list = config.get("enter_reason_list", ["all"])
         exit_reason_list = config.get("exit_reason_list", ["all"])
         indicator_list = config.get("indicator_list", [])
+        do_exited = config.get("analysis_exited", False)
         do_rejected = config.get("analysis_rejected", False)
         to_csv = config.get("analysis_to_csv", False)
         csv_path = Path(config.get("analysis_csv_path", config["exportfilename"]))
@@ -332,7 +341,12 @@ def process_entry_exit_reasons(config: Config):
             trades = load_backtest_data(config["exportfilename"], strategy_name)
 
             if trades is not None and not trades.empty:
-                signal_candles = _load_signal_candles(config["exportfilename"])
+                date_col = "open_date"
+                if do_exited is True:
+                    signal_candles = _load_exit_signal_candles(config["exportfilename"])
+                    date_col = "close_date"
+                else:
+                    signal_candles = _load_signal_candles(config["exportfilename"])
 
                 rej_df = None
                 if do_rejected:
@@ -346,7 +360,11 @@ def process_entry_exit_reasons(config: Config):
                     )
 
                 analysed_trades_dict = _process_candles_and_indicators(
-                    config["exchange"]["pair_whitelist"], strategy_name, trades, signal_candles
+                    config["exchange"]["pair_whitelist"],
+                    strategy_name,
+                    trades,
+                    signal_candles,
+                    date_col,
                 )
 
                 res_df = prepare_results(
@@ -364,6 +382,7 @@ def process_entry_exit_reasons(config: Config):
                     rejected_signals=rej_df,
                     to_csv=to_csv,
                     csv_path=csv_path,
+                    exited_signals=do_exited,
                 )
 
     except ValueError as e:
